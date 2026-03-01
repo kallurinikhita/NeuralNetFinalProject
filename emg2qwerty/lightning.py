@@ -269,3 +269,153 @@ class TDSConvCTCModule(pl.LightningModule):
             optimizer_config=self.hparams.optimizer,
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
+class CNNTransformerBiLSTMCTCModule(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,              # same meaning as before (per-band flattened spectrogram features)
+        mlp_features: Sequence[int],   # optional: keep the MLP front-end
+        cnn_channels: int,             # e.g. 256
+        cnn_kernel: int,               # e.g. 5
+        num_transformer_layers: int,   # e.g. 4
+        num_heads: int,                # e.g. 4 or 8
+        lstm_hidden: int,              # e.g. 256
+        lstm_layers: int,              # e.g. 2
+        dropout: float,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        # ----- Front-end: same as baseline (good starter) -----
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        self.frontend = nn.Sequential(
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            MultiBandRotationInvariantMLP(
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            nn.Flatten(start_dim=2),  # (T, N, num_features)
+        )
+
+        # ----- CNN/TCN over time (operate on T,N,C) -----
+        # Conv1d expects (N, C, T), so we transpose in forward.
+        self.cnn = nn.Sequential(
+            nn.Conv1d(num_features, cnn_channels, kernel_size=cnn_kernel, padding=cnn_kernel // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(cnn_channels, cnn_channels, kernel_size=cnn_kernel, padding=cnn_kernel // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        # ----- Transformer encoder over time (expects T,N,E) -----
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=cnn_channels,
+            nhead=num_heads,
+            dim_feedforward=4 * cnn_channels,
+            dropout=dropout,
+            batch_first=False,
+            activation="relu",
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=num_transformer_layers)
+
+        # ----- BiLSTM over time -----
+        self.bilstm = nn.LSTM(
+            input_size=cnn_channels,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+            bidirectional=True,
+        )
+
+        # ----- Linear -> classes -> logsoftmax for CTC -----
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * lstm_hidden, charset().num_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+        self.decoder = instantiate(decoder)
+
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {f"{phase}_metrics": metrics.clone(prefix=f"{phase}/") for phase in ["train", "val", "test"]}
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        x = self.frontend(inputs)          # (T, N, num_features)
+
+        # CNN over time
+        x = x.permute(1, 2, 0)             # (N, C, T)
+        x = self.cnn(x)                    # (N, cnn_channels, T)
+        x = x.permute(2, 0, 1)             # (T, N, cnn_channels)
+
+        # Transformer
+        x = self.transformer(x)            # (T, N, cnn_channels)
+
+        # BiLSTM
+        x, _ = self.bilstm(x)              # (T, N, 2*lstm_hidden)
+
+        # Classifier
+        return self.classifier(x)          # (T, N, num_classes)
+
+    # reuse the exact same _step / epoch_end / configure_optimizers from TDSConvCTCModule
+    def _step(self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)
+
+        emissions = self.forward(inputs)
+
+        # NOTE: this model uses padding='same' convs -> no time shrink, so:
+        emission_lengths = input_lengths
+
+        loss = self.ctc_loss(
+            log_probs=emissions,
+            targets=targets.transpose(0, 1),
+            input_lengths=emission_lengths,
+            target_lengths=target_lengths,
+        )
+
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets_np = targets.detach().cpu().numpy()
+        target_lengths_np = target_lengths.detach().cpu().numpy()
+        for i in range(N):
+            target = LabelData.from_labels(targets_np[: target_lengths_np[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs): return self._step("train", *args, **kwargs)
+    def validation_step(self, *args, **kwargs): return self._step("val", *args, **kwargs)
+    def test_step(self, *args, **kwargs): return self._step("test", *args, **kwargs)
+    def on_train_epoch_end(self): self._epoch_end("train")
+    def on_validation_epoch_end(self): self._epoch_end("val")
+    def on_test_epoch_end(self): self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )

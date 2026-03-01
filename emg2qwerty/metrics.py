@@ -13,7 +13,6 @@ from torchmetrics import Metric
 
 from emg2qwerty.data import LabelData
 
-
 class CharacterErrorRates(Metric):
     """Character-level error rates metrics based on Levenshtein edit-distance
     between the predicted and target sequences.
