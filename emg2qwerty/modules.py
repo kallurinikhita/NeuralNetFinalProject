@@ -397,3 +397,17 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+class GRUBlock(nn.Module):
+
+    def __init__(
+        self,
+        in_features: int,
+        gru_features: int,
+    ) -> None:
+        super().__init__()
+        self.gru = nn.GRU(input_size = in_features, hidden_size = gru_features, num_layers=1, batch_first = False)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        out, _ = self.gru(inputs)
+        return out
