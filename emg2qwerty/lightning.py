@@ -824,3 +824,69 @@ class TDSConvCTCGRUModule(pl.LightningModule):
             optimizer_config=self.hparams.optimizer,
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
+        
+class CNNLSTM_DROPOUTencoder(nn.Module):
+    """A CNN+LSTM encoder that applies convolutional blocks followed by
+    LSTM layers for temporal sequence modeling.
+
+    Args:
+        num_features (int): ``num_features`` for an input of shape
+            (T, N, num_features).
+        block_channels (list): A list of integers indicating the number
+            of channels per `TDSConv2dBlock`.
+        kernel_width (int): The kernel size of the temporal convolutions.
+        lstm_hidden_size (int): Hidden size for the LSTM layer. If None,
+            defaults to num_features.
+        lstm_num_layers (int): Number of LSTM layers. (default: 1)
+        lstm_bidirectional (bool): Whether to use bidirectional LSTM. (default: False)
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        block_channels: Sequence[int] = (24, 24, 24),
+        kernel_width: int = 32,
+        lstm_hidden_size: int | None = None,
+        # FOR DROPOUT TESTING:
+        lstm_num_layers: int = 2,
+        # lstm_num_layers: int = 1,
+        lstm_bidirectional: bool = True,
+    ) -> None:
+        super().__init__()
+
+        # CNN blocks
+        assert len(block_channels) > 0
+        cnn_blocks: list[nn.Module] = []
+        for channels in block_channels:
+            assert (
+                num_features % channels == 0
+            ), "block_channels must evenly divide num_features"
+            cnn_blocks.append(
+                TDSConv2dBlock(channels, num_features // channels, kernel_width)
+            )
+        self.cnn_blocks = nn.Sequential(*cnn_blocks)
+
+        # DROPOUT IN CNN
+        # self.cnn_dropout = nn.Dropout(0.25)
+
+        # LSTM block
+        self.lstm_block = LSTMBlock(
+            num_features=num_features,
+            hidden_size=lstm_hidden_size,
+            num_layers=lstm_num_layers,
+            bidirectional=lstm_bidirectional,
+            # FOR DROPOUT TESTING:
+            #dropout = 0.25
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # CNN
+        x = self.cnn_blocks(inputs)  # (T, N, num_features)
+
+        # DROPOUT IN CNN
+        # x = self.cnn_dropout(x)
+
+        # LSTM
+        x = self.lstm_block(x)  # (T, N, num_features)
+
+        return x
