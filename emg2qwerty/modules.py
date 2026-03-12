@@ -357,6 +357,50 @@ class CNNLSTMEncoder(nn.Module):
         x = self.lstm_block(x)  # (T, N, num_features)
 
         return x
+    
+class TCNEncoder(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        channels: Sequence[int],
+        kernel_size: int,
+        dropout: float,
+        dilation_mode: str = "exponential",
+    ) -> None:
+        super().__init__()
+
+        layers = []
+        dilations_used = []
+
+        for i, out_channels in enumerate(channels):
+            if dilation_mode == "exponential":
+                dilation = 2 ** i
+            elif dilation_mode == "linear":
+                dilation = i + 1
+            elif dilation_mode == "cyclic":
+                base = [1, 2, 4, 8]
+                dilation = base[i % len(base)]
+            else:
+                raise ValueError(f"Unknown dilation_mode: {dilation_mode}")
+
+            dilations_used.append(dilation)
+
+            curr_in = in_channels if i == 0 else channels[i - 1]
+            layers.append(
+                TemporalBlock(
+                    in_channels=curr_in,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+            )
+
+        print("TCN dilations:", dilations_used)
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.network(x)
 
 
 class TDSConvEncoder(nn.Module):
@@ -397,3 +441,15 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+    
+class Chomp1d(nn.Module):
+    def __init__(self, chomp_size: int) -> None:
+        super().__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.chomp_size == 0:
+            return x
+        return x[:, :, :-self.chomp_size]
+    
+
