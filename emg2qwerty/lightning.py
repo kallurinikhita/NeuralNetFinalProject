@@ -26,6 +26,11 @@ from emg2qwerty.modules import (
     TDSConvEncoder,
     CNNLSTMEncoder,
     GRUBlock,
+    TCNEncoder,
+    TemporalBlock,
+    TDSConv2dBlock,
+    LSTMBlock,  
+    Chomp1d,
 )
 from emg2qwerty.transforms import Transform
 
@@ -407,110 +412,6 @@ class TDSConvCTCModule(pl.LightningModule):
             optimizer_config=self.hparams.optimizer,
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
-    
-class Chomp1d(nn.Module):
-    def __init__(self, chomp_size: int) -> None:
-        super().__init__()
-        self.chomp_size = chomp_size
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.chomp_size == 0:
-            return x
-        return x[:, :, :-self.chomp_size]
-
-
-class TemporalBlock(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        dilation: int,
-        dropout: float,
-    ) -> None:
-        super().__init__()
-
-        padding = (kernel_size - 1) * dilation
-
-        self.net = nn.Sequential(
-            nn.Conv1d(
-                in_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                padding=padding,
-                dilation=dilation,
-            ),
-            Chomp1d(padding),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(
-                out_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                padding=padding,
-                dilation=dilation,
-            ),
-            Chomp1d(padding),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-
-        self.downsample = (
-            nn.Conv1d(in_channels, out_channels, kernel_size=1)
-            if in_channels != out_channels
-            else None
-        )
-        self.relu = nn.ReLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x)
-        res = x if self.downsample is None else self.downsample(x)
-        return self.relu(out + res)
-
-
-class TCNEncoder(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        channels: Sequence[int],
-        kernel_size: int,
-        dropout: float,
-        dilation_mode: str = "exponential",
-    ) -> None:
-        super().__init__()
-
-        layers = []
-        dilations_used = []
-
-        for i, out_channels in enumerate(channels):
-            if dilation_mode == "exponential":
-                dilation = 2 ** i
-            elif dilation_mode == "linear":
-                dilation = i + 1
-            elif dilation_mode == "cyclic":
-                base = [1, 2, 4, 8]
-                dilation = base[i % len(base)]
-            else:
-                raise ValueError(f"Unknown dilation_mode: {dilation_mode}")
-
-            dilations_used.append(dilation)
-
-            curr_in = in_channels if i == 0 else channels[i - 1]
-            layers.append(
-                TemporalBlock(
-                    in_channels=curr_in,
-                    out_channels=out_channels,
-                    kernel_size=kernel_size,
-                    dilation=dilation,
-                    dropout=dropout,
-                )
-            )
-
-        print("TCN dilations:", dilations_used)
-        self.network = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network(x)
     
 class CNNTCNBiLSTMCTCModule(pl.LightningModule):
     NUM_BANDS: ClassVar[int] = 2
