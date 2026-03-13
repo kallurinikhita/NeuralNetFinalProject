@@ -2,10 +2,10 @@
 module:
   _target_: emg2qwerty.lightning.FinalModule
   in_features: 528  # freq * channels = (n_fft // 2 + 1) * 16
-  mlp_features: [384]
+  mlp_features: [384] 
   block_channels: [24, 24, 24, 24]
   kernel_width: 32  # Total temporal receptive field of 125 samples given 4 layers
-  lstm_hidden_size: null  # null = auto-compute to match num_features
+  lstm_hidden_size: 384
   lstm_num_layers: 1
   lstm_bidirectional: true
   lstm_dropout: 0.0  # Dropout between LSTM layers (only used if num_layers > 1)
