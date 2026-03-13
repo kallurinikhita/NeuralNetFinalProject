@@ -6,7 +6,7 @@
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Sequence
+from typing import Any, ClassVar
 
 import numpy as np
 import pytorch_lightning as pl
@@ -25,12 +25,14 @@ from emg2qwerty.modules import (
     SpectrogramNorm,
     TDSConvEncoder,
     CNNLSTMEncoder,
+    VanillaRNNBlock,
     GRUBlock,
     TCNEncoder,
     TemporalBlock,
     TDSConv2dBlock,
     LSTMBlock,  
     Chomp1d,
+    CNNLSTM_DROPOUTencoder,
 )
 from emg2qwerty.transforms import Transform
 
@@ -157,6 +159,8 @@ class FinalModule(pl.LightningModule):
         lstm_hidden_size: int | None = None,
         lstm_num_layers: int = 1,
         lstm_bidirectional: bool = True,
+        lstm_dropout: float = 0.0,
+        cnn_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -183,6 +187,8 @@ class FinalModule(pl.LightningModule):
                 lstm_hidden_size=lstm_hidden_size,
                 lstm_num_layers=lstm_num_layers,
                 lstm_bidirectional=lstm_bidirectional,
+                lstm_dropout=lstm_dropout,
+                cnn_dropout=cnn_dropout,
             ),
             # (T, N, num_classes)
             nn.Linear(num_features, charset().num_classes),
@@ -586,6 +592,155 @@ class CNNTCNBiLSTMCTCModule(pl.LightningModule):
             optimizer_config=self.hparams.optimizer,
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
+
+class CNNVanillaRNNModule(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        block_channels: Sequence[int],
+        kernel_width: int,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+        #for vanilla RNN
+        rnn_hidden_size:int,
+        rnn_num_layers:int = 1,
+        rnn_bidirection:bool=False,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        # not using bidirectional option
+        #num_rnn = rnn_hidden_size * 2
+        num_rnn = rnn_hidden_size
+
+        # Model
+        # inputs: (T, N, bands=2, electrode_channels=16, freq)
+        self.model = nn.Sequential(
+            # (T, N, bands=2, C=16, freq)
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            # (T, N, bands=2, mlp_features[-1])
+            MultiBandRotationInvariantMLP(
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            # (T, N, num_features)
+            nn.Flatten(start_dim=2),
+            TDSConvEncoder(
+                num_features=num_features,
+                block_channels=block_channels,
+                kernel_width=kernel_width,
+            ),
+            # (T, N, rnn_hidden_size * (if rnn_bidirection))
+            VanillaRNNBlock(
+                num_features=num_features,
+                rnn_hidden_size=rnn_hidden_size,
+                rnn_num_layers=rnn_num_layers,
+                rnn_bidirection=rnn_bidirection,
+            ),
+            # (T, N, num_classes)
+            nn.Linear(num_rnn, charset().num_classes),  
+            #nn.Linear(num_features, charset().num_classes), 
+            nn.LogSoftmax(dim=-1),
+        )
+
+        # Criterion
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+
+        # Decoder
+        self.decoder = instantiate(decoder)
+
+        # Metrics
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {
+                f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+                for phase in ["train", "val", "test"]
+            }
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.model(inputs)
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)  # batch_size
+
+        emissions = self.forward(inputs)
+
+        # Shrink input lengths by an amount equivalent to the conv encoder's
+        # temporal receptive field to compute output activation lengths for CTCLoss.
+        # NOTE: This assumes the encoder doesn't perform any temporal downsampling
+        # such as by striding.
+        T_diff = inputs.shape[0] - emissions.shape[0]
+        emission_lengths = input_lengths - T_diff
+
+        loss = self.ctc_loss(
+            log_probs=emissions,  # (T, N, num_classes)
+            targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
+            input_lengths=emission_lengths,  # (N,)
+            target_lengths=target_lengths,  # (N,)
+        )
+
+        # Decode emissions
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        # Update metrics
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets = targets.detach().cpu().numpy()
+        target_lengths = target_lengths.detach().cpu().numpy()
+        for i in range(N):
+            # Unpad targets (T, N) for batch entry
+            target = LabelData.from_labels(targets[: target_lengths[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("train", *args, **kwargs)
+
+    def validation_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("val", *args, **kwargs)
+
+    def test_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )
     
 class TDSConvCTCGRUModule(pl.LightningModule):
     NUM_BANDS: ClassVar[int] = 2
@@ -726,68 +881,3 @@ class TDSConvCTCGRUModule(pl.LightningModule):
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
         
-class CNNLSTM_DROPOUTencoder(nn.Module):
-    """A CNN+LSTM encoder that applies convolutional blocks followed by
-    LSTM layers for temporal sequence modeling.
-
-    Args:
-        num_features (int): ``num_features`` for an input of shape
-            (T, N, num_features).
-        block_channels (list): A list of integers indicating the number
-            of channels per `TDSConv2dBlock`.
-        kernel_width (int): The kernel size of the temporal convolutions.
-        lstm_hidden_size (int): Hidden size for the LSTM layer. If None,
-            defaults to num_features.
-        lstm_num_layers (int): Number of LSTM layers. (default: 1)
-        lstm_bidirectional (bool): Whether to use bidirectional LSTM. (default: False)
-    """
-
-    def __init__(
-        self,
-        num_features: int,
-        block_channels: Sequence[int] = (24, 24, 24),
-        kernel_width: int = 32,
-        lstm_hidden_size: int | None = None,
-        # FOR DROPOUT TESTING:
-        lstm_num_layers: int = 2,
-        # lstm_num_layers: int = 1,
-        lstm_bidirectional: bool = True,
-    ) -> None:
-        super().__init__()
-
-        # CNN blocks
-        assert len(block_channels) > 0
-        cnn_blocks: list[nn.Module] = []
-        for channels in block_channels:
-            assert (
-                num_features % channels == 0
-            ), "block_channels must evenly divide num_features"
-            cnn_blocks.append(
-                TDSConv2dBlock(channels, num_features // channels, kernel_width)
-            )
-        self.cnn_blocks = nn.Sequential(*cnn_blocks)
-
-        # DROPOUT IN CNN
-        # self.cnn_dropout = nn.Dropout(0.25)
-
-        # LSTM block
-        self.lstm_block = LSTMBlock(
-            num_features=num_features,
-            hidden_size=lstm_hidden_size,
-            num_layers=lstm_num_layers,
-            bidirectional=lstm_bidirectional,
-            # FOR DROPOUT TESTING:
-            #dropout = 0.25
-        )
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        # CNN
-        x = self.cnn_blocks(inputs)  # (T, N, num_features)
-
-        # DROPOUT IN CNN
-        # x = self.cnn_dropout(x)
-
-        # LSTM
-        x = self.lstm_block(x)  # (T, N, num_features)
-
-        return x

@@ -3,6 +3,23 @@ to_tensor:
   _target_: emg2qwerty.transforms.ToTensor
   fields: [emg_left, emg_right]
 
+per_channel_norm:
+  _target_: emg2qwerty.transforms.PerChannelStandardization
+  eps: 1e-6
+
+notch_filter:
+  _target_: emg2qwerty.transforms.NotchFilter
+  freqs: [60.0, 120.0, 180.0]  # 60Hz power line + harmonics
+  fs: 2000.0
+  quality: 30.0
+
+bandpass_filter:
+  _target_: emg2qwerty.transforms.BandpassFilter
+  lowcut: 20.0
+  highcut: 500.0
+  fs: 2000.0
+  order: 4
+
 band_rotation:
   _target_: emg2qwerty.transforms.ForEach  # i.i.d rotation offset for each band
   transform:
@@ -21,18 +38,19 @@ logspec:
 
 specaug:
   _target_: emg2qwerty.transforms.SpecAugment
-  # n_time_masks: 3
   n_time_masks: 3
   # time_mask_param: 25  # Max 200ms per time mask for 125Hz spectrogram
   time_mask_param: 15
   # n_freq_masks: 2
   n_freq_masks: 2
-  # freq_mask_param: 4
-  freq_mask_param: 3
+  freq_mask_param: 4
 
 transforms:
   train:
     - ${to_tensor}
+    - ${per_channel_norm}
+    # - ${notch_filter}
+    # - ${bandpass_filter}
     - ${band_rotation}
     - ${temporal_jitter}
     - ${logspec}
@@ -40,6 +58,9 @@ transforms:
 
   val:
     - ${to_tensor}
+    - ${per_channel_norm}
+    # - ${notch_filter}
+    # - ${bandpass_filter}
     - ${logspec}
 
   test: ${transforms.val}
