@@ -11,11 +11,134 @@ from typing import Any, TypeVar
 import numpy as np
 import torch
 import torchaudio
+from scipy import signal
 
 
 TTransformIn = TypeVar("TTransformIn")
 TTransformOut = TypeVar("TTransformOut")
 Transform = Callable[[TTransformIn], TTransformOut]
+
+
+@dataclass
+class BandpassFilter:
+    """Applies a Butterworth bandpass filter to EMG signals removing DC offset and high-frequency noise.
+        The filter is applied independently to each channel.
+
+    Args:
+        lowcut (float): Low cutoff frequency in Hz (high-pass). (default: 20.0)
+        highcut (float): High cutoff frequency in Hz (low-pass). (default: 500.0)
+        fs (float): Sampling frequency in Hz. (default: 2000.0)
+        order (int): Filter order. Higher order = sharper cutoff but more
+            phase distortion. (default: 4)
+    """
+
+    lowcut: float = 20.0
+    highcut: float = 500.0
+    fs: float = 2000.0
+    order: int = 4
+
+    def __post_init__(self) -> None:
+        # Build up the filter
+        nyquist = 0.5 * self.fs
+        low = self.lowcut / nyquist
+        high = self.highcut / nyquist
+
+        self.b, self.a = signal.butter(
+            self.order,
+            [low, high],
+            btype='band'
+        )
+
+    def __call__(self, data: np.ndarray | torch.Tensor) -> torch.Tensor:
+        # Convert to numpy if torch tensor
+        is_torch = isinstance(data, torch.Tensor)
+        if is_torch:
+            np_data = data.numpy()
+        else:
+            np_data = data
+
+        # Check for negative strides
+        if not np_data.flags['C_CONTIGUOUS']:
+            np_data = np.ascontiguousarray(np_data)
+
+        # Apply filter along time axis (axis=0)
+        # filtfilt applies filter forward and backward for zero-phase
+        filtered = signal.filtfilt(self.b, self.a, np_data, axis=0)
+
+        # Check for negative strides
+        if not filtered.flags['C_CONTIGUOUS']:
+            filtered = np.ascontiguousarray(filtered)
+
+        # Convert back to torch tensor
+        return torch.as_tensor(filtered, dtype=torch.float32)
+
+
+@dataclass
+class NotchFilter:
+    """Applies notch filters to remove 60 Hz electronic noise.
+
+    The filter is applied independently to each channel.
+    Args:
+        freqs (list): Frequencies to remove in Hz. (default: [60.0, 120.0, 180.0])
+        fs (float): Sampling frequency in Hz. (default: 2000.0)
+        quality (float): Quality factor. Higher = narrower notch, more selective.
+            (default: 30.0)
+    """
+
+    freqs: Sequence[float] = (60.0, 120.0, 180.0)  # 60Hz + 2nd and 3rd harmonics
+    fs: float = 2000.0
+    quality: float = 30.0
+
+    def __post_init__(self) -> None:
+        # Design notch filters for each frequency
+        self.filters: list[tuple[np.ndarray, np.ndarray]] = []
+        for freq in self.freqs:
+            b, a = signal.iirnotch(freq, self.quality, self.fs)
+            self.filters.append((b, a))
+
+    def __call__(self, data: np.ndarray | torch.Tensor) -> torch.Tensor:
+        # Convert to numpy if torch tensor
+        is_torch = isinstance(data, torch.Tensor)
+        if is_torch:
+            np_data = data.numpy()
+        else:
+            np_data = data
+
+        # Check for negative strides
+        if not np_data.flags['C_CONTIGUOUS']:
+            np_data = np.ascontiguousarray(np_data)
+
+        # Apply each notch filter sequentially along time axis (axis=0)
+        filtered = np_data
+        for b, a in self.filters:
+            filtered = signal.filtfilt(b, a, filtered, axis=0)
+
+        # Check for negative strides
+        if not filtered.flags['C_CONTIGUOUS']:
+            filtered = np.ascontiguousarray(filtered)
+
+        # Convert back to torch tensor
+        return torch.as_tensor(filtered, dtype=torch.float32)
+
+
+@dataclass
+class PerChannelStandardization:
+    """Standardizes each EMG channel independently to zero mean, unit variance.
+
+    This helps normalize differences in the EMG sensors.
+
+    Args:
+        eps (float): Small constant to avoid division by zero. (default: 1e-6)
+    """
+
+    eps: float = 1e-6
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        # data: (T, N, C) where T=time, N=bands, C=channels
+        # Compute mean and std along time axis (dim=0)
+        mean = data.mean(dim=0, keepdim=True)
+        std = data.std(dim=0, keepdim=True)
+        return (data - mean) / (std + self.eps)
 
 
 @dataclass
