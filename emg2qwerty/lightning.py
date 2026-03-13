@@ -185,8 +185,8 @@ class FinalModule(pl.LightningModule):
                 lstm_hidden_size=lstm_hidden_size,
                 lstm_num_layers=lstm_num_layers,
                 lstm_bidirectional=lstm_bidirectional,
-                lstm_dropout= 0.0,
-                cnn_dropout= 0.0,
+                lstm_dropout=lstm_dropout,
+                cnn_dropout=cnn_dropout,
             ),
             # (T, N, num_classes)
             nn.Linear(num_features, charset().num_classes),
