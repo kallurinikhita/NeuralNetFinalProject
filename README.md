@@ -1,28 +1,84 @@
-# C147/247 Final Project
-### Winter 2026 
+# Hybrid CNN Architectures for Keystroke Prediction from Surface Electromyography
 
-This course project is built upon the emg2qwerty work from Meta. The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo and we encourage you to take a look at their work.**
+CS247A Final Project – Winter 2026  
+Emma Thorssell, Caleb Kim, Nikhita Kalluri, Madison Sarmiento
 
-## Guiding Tips + FAQs
-_Last updated 2/13/2025_
-- Read through the Project Guidelines to ensure that you have a clear understanding of what we expect
-- Familiarize yourself with the prediction task and get a high-level understanding of their base architecture (it would be beneficial to read about CTC loss)
-- Get comfortable with the codebase
-  - ```lightning.py``` + ```modules.py``` - where most of your model architecture development will take place
-  - ```data.py``` - defines PyTorch dataset (likely will not need to touch this much)
-  - ```transforms.py``` - implement more data transforms and other preprocessing techniques
-  - ```config/*.yaml``` - modify model hyperparameters and PyTorch Lightning training configuration
-    - **Q: How do we update these configuration files?** A: Note the structure of YAML files include basic key-value pairs (i.e. ```<key>: <value>```) and hierarchical structure. So, for instance, if we wanted to update the ```mlp_features``` hyperparameter of the ```TDSConvCTCModule```, we would change the value at line 5 of ```config/model/tds_conv_ctc.yaml``` (under ```module```). _Read more details [here](https://pytorch-lightning.readthedocs.io/en/1.3.8/common/lightning_cli.html)._
-    - **Q: Where do we configure data splitting?** A: Refer to ```config/user/single_user.yaml```. Be careful with your edits, so that you don't accidentally move the test data into your training set.
+## Overview
 
-# emg2qwerty
+This project investigates deep learning architectures for decoding typing keystrokes from **surface electromyography (sEMG)** signals.
+
+Using the **emg2qwerty dataset**, we train models to map continuous EMG signals recorded from wrist electrodes to character sequences using **Connectionist Temporal Classification (CTC)**.
+
+The main goal is to minimize **Character Error Rate (CER)** when predicting typed characters from EMG signals recorded from a **single participant**.
+
+We evaluate several hybrid architectures:
+- CNN + Vanilla RNN
+- CNN + GRU
+- CNN + BiLSTM
+- CNN + TCN + BiLSTM
+- CNN + Transformer + BiLSTM (exploratory)
+
+Our best performing model achieved:
+
+**Test CER = 18.67**  
+using an optimized **CNN-BiLSTM architecture**.
+
+---
+
+## Repository Structure
+
+```text
+emg2qwerty/
+├── emg2qwerty/
+│   ├── lightning.py        # PyTorch Lightning modules
+│   ├── modules.py          # Model architectures
+│   ├── data.py             # Dataset loading utilities
+│   └── transforms.py       # Data preprocessing
+│
+├── config/
+│   ├── model/
+│   ├── user/
+│   └── trainer/
+│
+├── scripts/
+│   ├── generate_splits.py
+│   └── print_dataset_stats.py
+│
+├── models/
+│   └── checkpoints/
+│
+├── environment.yml
+└── README.md
+```
+
+---
+# emg2qwerty Dataset
 [ [`Paper`](https://arxiv.org/abs/2410.20081) ] [ [`Dataset`](https://fb-ctrl-oss.s3.amazonaws.com/emg2qwerty/emg2qwerty-data-2021-08.tar.gz) ] [ [`Blog`](https://ai.meta.com/blog/open-sourcing-surface-electromyography-datasets-neurips-2024/) ] [ [`BibTeX`](#citing-emg2qwerty) ]
 
-A dataset of surface electromyography (sEMG) recordings while touch typing on a QWERTY keyboard with ground-truth, benchmarks and baselines.
+We use the **emg2qwerty dataset** introduced by:
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/71a9f361-7685-4188-83c3-099a009b6b81" height="80%" width="80%" alt="alt="sEMG recording" >
-</p>
+> Sivakumar et al., 2024  
+> *emg2qwerty: A Large Dataset with Baselines for Touch Typing using Surface Electromyography*
+
+The dataset contains:
+
+- **108 users**
+- **346 hours of recordings**
+- **32 EMG channels** (16 per wrist)
+- **2 kHz sampling rate**
+- aligned **QWERTY keystrokes**
+
+For this project we train models on the **single-user subset**:
+User ID: 89335547
+
+
+Each recording is stored as an **HDF5 session file** containing:
+- left/right EMG signals
+- typed prompts
+- ground truth keystrokes
+- timestamps
+
+---
 
 ## Setup
 
@@ -42,98 +98,129 @@ cd ~ && wget https://fb-ctrl-oss.s3.amazonaws.com/emg2qwerty/emg2qwerty-data-202
 tar -xvzf emg2qwerty-data-2021-08.tar.gz
 ln -s ~/emg2qwerty-data-2021-08 ~/emg2qwerty/data
 ```
+---
 
-## Data
-
-The dataset consists of 1,136 files in total - 1,135 session files spanning 108 users and 346 hours of recording, and one `metadata.csv` file. Each session file is in a simple HDF5 format and includes the left and right sEMG signal data, prompted text, keylogger ground-truth, and their corresponding timestamps. `emg2qwerty.data.EMGSessionData` offers a programmatic read-only interface into the HDF5 session files.
-
-To load the `metadata.csv` file and print dataset statistics,
+# Training Models
+### Personalized (single-user) model
 
 ```shell
-python scripts/print_dataset_stats.py
+python -m emg2qwerty.train
+user="single_user"
+trainer.accelerator=gpu
+trainer.devices=1
 ```
 
-<p align="center">
-  <img src="https://user-images.githubusercontent.com/172884/131012947-66cab4c4-963c-4f1a-af12-47fea1681f09.png" alt="Dataset statistics" height="50%" width="50%">
-</p>
+All models were trained with:
+- up to **80 epochs**
+- **early stopping** based on validation CER
+- **CTC loss**
+- fixed random seed for reproducibility
 
-To re-generate data splits,
+---
 
-```shell
-python scripts/generate_splits.py
-```
+# Architectures Evaluated
+### Baseline
+**TDS Convolutional Encoder**
+Temporal Depthwise Separable convolution layers followed by a linear classifier trained with **CTC loss**.
 
-The following figure visualizes the dataset splits for training, validation and testing of generic and personalized user models. Refer to the paper for details of the benchmark setup and data splits.
+Baseline performance:
+Test CER = 21.89
 
-<p align="center">
-  <img src="https://user-images.githubusercontent.com/172884/131012465-504eccbf-8eac-4432-b8aa-0e453ad85b49.png" alt="Data splits">
-</p>
 
-To re-format data in [EEG BIDS format](https://bids-specification.readthedocs.io/en/stable/04-modality-specific-files/03-electroencephalography.html),
+---
 
-```shell
-python scripts/convert_to_bids.py
-```
+### Hybrid CNN Models
 
-## Training
+Hybrid architectures combine:
 
-Generic user model:
+- CNN feature extraction
+- temporal sequence models
 
-```shell
-python -m emg2qwerty.train \
-  user=generic \
-  trainer.accelerator=gpu trainer.devices=8 \
-  --multirun
-```
+| Model | Test CER |
+|------|------|
+| Baseline CNN | 21.89 |
+| CNN + Vanilla RNN | 20.92 |
+| CNN + GRU | 21.44 |
+| CNN + BiLSTM | 20.66 |
+| CNN + TCN + BiLSTM | 21.37 |
 
-Personalized user models:
+The **CNN-BiLSTM** model was selected for further optimization.
 
-```shell
-python -m emg2qwerty.train \
-  user="single_user" \
-  trainer.accelerator=gpu trainer.devices=1
-```
+---
 
-If you are using a Slurm cluster, include "cluster=slurm" override in the argument list of above commands to pick up `config/cluster/slurm.yaml`. This overrides the Hydra Launcher to use [Submitit plugin](https://hydra.cc/docs/plugins/submitit_launcher). Refer to Hydra documentation for the list of available launcher plugins if you are not using a Slurm cluster.
+# Optimization Experiments
 
-## Testing
+Several techniques were evaluated to improve performance.
 
-Greedy decoding:
+| Method | Test CER |
+|------|------|
+| CNN-BiLSTM (chosen baseline) | 20.66 |
+| Dropout after CNN layers | 19.08 |
+| Dropout after CNN + LSTM layers | 20.42 |
+| Scaling MLP + LSTM features | **18.00** |
+| Filters | 20.96 |
+| Normalization | 18.67 |
 
-```shell
-python -m emg2qwerty.train \
-  user="glob(user*)" \
-  checkpoint="${HOME}/emg2qwerty/models/personalized-finetuned/\${user}.ckpt" \
-  train=False trainer.accelerator=cpu \
-  decoder=ctc_greedy \
-  hydra.launcher.mem_gb=64 \
-  --multirun
-```
+Best configuration:
 
-Beam-search decoding with 6-gram character-level language model:
+CNN-BiLSTM with scaled hidden features and dropout after CNN layers.
 
-```shell
-python -m emg2qwerty.train \
-  user="glob(user*)" \
-  checkpoint="${HOME}/emg2qwerty/models/personalized-finetuned/\${user}.ckpt" \
-  train=False trainer.accelerator=cpu \
-  decoder=ctc_beam \
-  hydra.launcher.mem_gb=64 \
-  --multirun
-```
 
-The 6-gram character-level language model, used by the first-pass beam-search decoder above, is generated from [WikiText-103 raw dataset](https://huggingface.co/datasets/wikitext), and built using [KenLM](https://github.com/kpu/kenlm). The LM is available under `models/lm/`, both in the binary format, and the human-readable [ARPA format](https://cmusphinx.github.io/wiki/arpaformat/). These can be regenerated as follows:
+Final model performance:
+Test CER = 18.67
 
-1. Build kenlm from source: <https://github.com/kpu/kenlm#compiling>
-2. Run `./scripts/lm/build_char_lm.sh <ngram_order>`
+---
 
-## License
+# TCN Experiments
 
+We also explored replacing the TDS block with a **Temporal Convolutional Network (TCN)**.
+
+| Kernel | Dilation | Test CER |
+|------|------|------|
+| 3 | exponential | 21.37 |
+| 5 | exponential | 21.72 |
+| 3 | linear | failed |
+| 3 | cyclic | 99.74 |
+
+TCNs did not outperform the baseline architecture.
+
+---
+
+# Key Findings
+1. **Hybrid convolutional-recurrent architectures outperformed convolution models.**
+2. **CNN + BiLSTM performed best for EMG decoding.**
+3. **Transformers perform poorly due to long input sequences and limited training data.**
+4. **Channel interactions are important for EMG signals**, which may explain why TDS and CNN layers perform well.
+
+---
+
+# Key Files Modified
+- emg2qwerty/modules.py
+- emg2qwerty/lightning.py
+
+### Model Architecture
+- emg2qwerty/modules.py
+- emg2qwerty/lightning.py
+
+
+### Data preprocessing
+- emg2qwerty/transforms.py
+
+
+### Hyperparameters
+- config/model/*.yaml
+
+
+### Dataset splits
+- config/user/single_user.yaml
+
+---
+
+# License
 emg2qwerty is CC-BY-NC-4.0 licensed, as found in the LICENSE file.
 
-## Citing emg2qwerty
-
-```
+# Citing emg2qwerty
+```shell
 @misc{sivakumar2024emg2qwertylargedatasetbaselines,
       title={emg2qwerty: A Large Dataset with Baselines for Touch Typing using Surface Electromyography},
       author={Viswanath Sivakumar and Jeffrey Seely and Alan Du and Sean R Bittner and Adam Berenzweig and Anuoluwapo Bolarinwa and Alexandre Gramfort and Michael I Mandel},
@@ -144,3 +231,5 @@ emg2qwerty is CC-BY-NC-4.0 licensed, as found in the LICENSE file.
       url={https://arxiv.org/abs/2410.20081},
 }
 ```
+
+
