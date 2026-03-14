@@ -1,7 +1,7 @@
 # Hybrid CNN Architectures for Keystroke Prediction from Surface Electromyography
 
 CS247A Final Project – Winter 2026  
-Emma Thorssell, Caleb Kim, Nikhita Kalluri, Madison Sarmiento
+Emma Thorssell, Gavin McKim, Nikhita Kalluri, Madison Sarmiento
 
 ## Overview
 
@@ -20,8 +20,10 @@ We evaluate several hybrid architectures:
 
 Our best performing model achieved:
 
-**Test CER = 18.67**  
+**Test CER = 17.72**  
 using an optimized **CNN-BiLSTM architecture**.
+
+Colab_setup.ipynb has a cell to run final_module_config and replicate this result
 
 ---
 
@@ -167,7 +169,7 @@ CNN-BiLSTM with scaled hidden features and dropout after CNN layers.
 
 
 Final model performance:
-Test CER = 18.67
+Test CER = 17.72
 
 ---
 

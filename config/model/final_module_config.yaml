@@ -9,7 +9,7 @@ module:
   lstm_num_layers: 1
   lstm_bidirectional: true
   lstm_dropout: 0.0  # Dropout between LSTM layers (only used if num_layers > 1)
-  cnn_dropout: 0.0  # Dropout after each CNN block
+  cnn_dropout: 0.25  # Dropout after each CNN block
 
 datamodule:
   _target_: emg2qwerty.lightning.WindowedEMGDataModule

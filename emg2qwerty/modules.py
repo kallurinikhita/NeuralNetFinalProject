@@ -341,9 +341,12 @@ class CNNLSTMEncoder(nn.Module):
             cnn_blocks.append(
                 TDSConv2dBlock(channels, num_features // channels, kernel_width)
             )
-            if cnn_dropout > 0.0:
-                cnn_blocks.append(nn.Dropout(cnn_dropout))
+            #if cnn_dropout > 0.0:
+            #    cnn_blocks.append(nn.Dropout(cnn_dropout))
         self.cnn_blocks = nn.Sequential(*cnn_blocks)
+
+        self.cnn_dropout_block = nn.Dropout(cnn_dropout)
+        self.cnn_dropout_chance = cnn_dropout
 
         # LSTM block
         self.lstm_block = LSTMBlock(
@@ -357,6 +360,9 @@ class CNNLSTMEncoder(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # CNN
         x = self.cnn_blocks(inputs)  # (T, N, num_features)
+
+        if self.cnn_dropout_chance > 0.0:
+            x = self.cnn_dropout_block(x)
 
         # LSTM
         x = self.lstm_block(x)  # (T, N, num_features)
